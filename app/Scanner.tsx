@@ -41,7 +41,7 @@ async function postWithRetry(
     try {
       const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "text/plain" },
         body: JSON.stringify(body),
       });
       if (res.ok) return;
@@ -694,9 +694,11 @@ export default function Scanner() {
                     style={{ background: "#0a0f1eee", padding: 20, justifyContent: "flex-start", paddingTop: 32 }}
                   >
                     <div className="sc-member" style={{ width: "100%", boxSizing: "border-box" }}>
-                      <div className="sc-member-id">ID · {member.id}</div>
+                      <div className="sc-member-id" title={member.id} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {member.id || "—"}
+                      </div>
                       <div className="sc-member-name">{member.name}</div>
-                      <div className="sc-member-dept">{member.dept}</div>
+                      <div className="sc-member-dept">{member.dept || "No department"}</div>
                     </div>
 
                     {alreadyCheckedIn ? (
