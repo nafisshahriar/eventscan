@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Html5Qrcode } from 'html5-qrcode';
+import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 
 interface StudentData {
   id: string;
@@ -71,30 +71,31 @@ export default function Scanner() {
   }, [appState, config]);
 
   // 3. Camera Controls (Optimized for continuous scanning)
+  // 3. Camera Controls (Maximum Performance Optimized)
+// 3. Camera Controls (Maximum Performance Optimized)
   const startCamera = async () => {
     setAppState('STARTING_CAMERA');
     try {
       if (!scannerRef.current) {
-        scannerRef.current = new Html5Qrcode("reader");
+        // ⚡ SPEEDUP 1: Restrict formats HERE in the constructor
+        scannerRef.current = new Html5Qrcode("reader", {
+          formatsToSupport: [ Html5QrcodeSupportedFormats.QR_CODE ],
+          verbose: false // <-- This completely satisfies TypeScript
+        });
       }
       
       await scannerRef.current.start(
         { facingMode: "environment" }, 
         { 
-          fps: 15, // Scans 15 times per second
-          // Dynamically size the box to 70% of the screen
-          qrbox: (viewfinderWidth, viewfinderHeight) => {
-            const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-            const size = Math.floor(minEdge * 0.7);
-            return { width: size, height: size };
-          },
-          aspectRatio: 1.0
+          fps: 10, 
+          qrbox: 250, 
+          disableFlip: true // ⚡ SPEEDUP 2: Stop checking for mirrored codes
         },
         async (decodedText) => {
           if (canScanRef.current) {
             canScanRef.current = false;
             
-            // PAUSE the camera visually instead of destroying it
+            // Freeze camera frame instantly
             try { scannerRef.current?.pause(true); } catch(e){} 
             
             await processScan(decodedText);
