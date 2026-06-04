@@ -35,8 +35,9 @@ export default function Scanner() {
   
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const canScanRef = useRef<boolean>(true); // Prevents double-scanning
 
-  // 1. Safe Initialization (Prevents SSR hydration mismatch)
+  // 1. Safe Initialization
   useEffect(() => {
     const savedConfig = localStorage.getItem('ewumuncScannerConfig');
     if (savedConfig) {
@@ -69,7 +70,7 @@ export default function Scanner() {
     testConnection();
   }, [appState, config]);
 
-  // 3. Camera Controls
+  // 3. Camera Controls (Optimized for continuous scanning)
   const startCamera = async () => {
     setAppState('STARTING_CAMERA');
     try {
@@ -81,13 +82,16 @@ export default function Scanner() {
         { facingMode: "environment" }, 
         { fps: 10, qrbox: { width: 250, height: 250 }, aspectRatio: 1.0 },
         async (decodedText) => {
-          // Pause camera immediately upon finding a QR to prevent double-firing
-          if (scannerRef.current && scannerRef.current.isScanning) {
-            scannerRef.current.pause(true);
+          if (canScanRef.current) {
+            canScanRef.current = false;
+            
+            // PAUSE the camera visually instead of destroying it
+            try { scannerRef.current?.pause(true); } catch(e){} 
+            
+            await processScan(decodedText);
           }
-          await processScan(decodedText);
         },
-        () => {} // Ignore frame errors
+        () => {} // Ignore frame errors silently
       );
       setAppState('SCANNING');
     } catch (err) {
@@ -97,21 +101,25 @@ export default function Scanner() {
     }
   };
 
-  const stopCamera = async () => {
-    if (scannerRef.current && scannerRef.current.isScanning) {
+  // RESUME camera for the next person
+  const resumeCamera = () => {
+    setScannedUser(null);
+    setAppState('SCANNING');
+    try { scannerRef.current?.resume(); } catch(e){}
+    
+    // Slight delay before unlocking the scan gate to prevent accidental double-scans
+    setTimeout(() => { canScanRef.current = true; }, 400); 
+  };
+
+  // Completely destroy camera only if user logs out/disconnects
+  const hardStopCamera = async () => {
+    if (scannerRef.current) {
       try {
         await scannerRef.current.stop();
         scannerRef.current.clear();
-      } catch (err) {
-        console.error("Error stopping camera", err);
-      }
+      } catch (err) { /* ignore */ }
     }
   };
-
-  // Ensure camera stops if user unmounts or leaves the page
-  useEffect(() => {
-    return () => { stopCamera(); };
-  }, []);
 
   // 4. Data Processing
   const processScan = async (id: string) => {
@@ -120,19 +128,16 @@ export default function Scanner() {
       const response = await fetch(`${config!.url}?id=${encodeURIComponent(id)}&col=${encodeURIComponent(config!.column)}`);
       const data: StudentData = await response.json();
       
-      await stopCamera(); // Release hardware while showing result
-      
       if (data.error) {
         alert("⚠️ Delegate ID not found in database.");
-        setAppState('IDLE');
+        resumeCamera(); // Go straight back to scanning
       } else {
         setScannedUser(data);
         setAppState('RESULT');
       }
     } catch (err) {
       alert("❌ Network error. Please check your connection.");
-      await stopCamera();
-      setAppState('IDLE');
+      resumeCamera();
     }
   };
 
@@ -146,14 +151,7 @@ export default function Scanner() {
       body: JSON.stringify({ row: scannedUser.row, col: config.column, val: 1 }),
     }).catch(() => console.error("Sync failed"));
 
-    alert(`✅ Confirmed: ${scannedUser.name}`);
-    setScannedUser(null);
-    setAppState('IDLE');
-  };
-
-  const handleCancel = () => {
-    setScannedUser(null);
-    setAppState('IDLE');
+    resumeCamera(); // Instantly jump back to the live scanner
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -165,6 +163,7 @@ export default function Scanner() {
     
     try {
       const result = await scannerRef.current.scanFile(file, true);
+      canScanRef.current = false;
       await processScan(result);
     } catch (err) {
       alert("Could not detect a clear QR code. Please try again.");
@@ -173,20 +172,20 @@ export default function Scanner() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  const resetSetup = () => {
-    stopCamera();
+  const resetSetup = async () => {
+    await hardStopCamera();
     localStorage.removeItem('ewumuncScannerConfig');
     setConfig(null);
     setAppState('SETUP');
   };
 
   // ==========================================
-  // RENDER: INITIALIZING OR TESTING CONNECTION
+  // RENDER: INITIALIZING / LOADING
   // ==========================================
   if (appState === 'INITIALIZING' || appState === 'TESTING_CONNECTION') {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', fontFamily: 'system-ui' }}>
-        <div style={{ width: '40px', height: '40px', border: '4px solid #f1f5f9', borderTop: '4px solid #1e3a8a', borderRadius: '50%', animation: 'spin 1s linear infinite', marginBottom: '20px' }} />
+        <div style={{ width: '40px', height: '40px', border: '4px solid #e2e8f0', borderTop: '4px solid #1e3a8a', borderRadius: '50%', animation: 'spin 1s linear infinite', marginBottom: '20px' }} />
         <p style={{ color: '#475569', fontWeight: '600', fontSize: '16px' }}>
           {appState === 'INITIALIZING' ? 'Loading Portal...' : 'Securing Connection...'}
         </p>
@@ -196,14 +195,14 @@ export default function Scanner() {
   }
 
   // ==========================================
-  // RENDER: SETUP SCREEN
+  // RENDER: SETUP SCREEN (Fixed Colors)
   // ==========================================
   if (appState === 'SETUP') {
     return (
-      <div style={{ maxWidth: '400px', margin: '40px auto', padding: '30px', background: '#ffffff', borderRadius: '16px', boxShadow: '0 10px 25px rgba(0,0,0,0.05)', fontFamily: 'system-ui, sans-serif' }}>
-        <div style={{ textAlign: 'center', marginBottom: '25px' }}>
-          <h1 style={{ color: '#1e3a8a', margin: '0 0 5px 0', fontSize: '24px', letterSpacing: '-0.5px' }}>EWUMUNC</h1>
-          <p style={{ color: '#64748b', fontSize: '14px', margin: 0, textTransform: 'uppercase', letterSpacing: '1px', fontWeight: 'bold' }}>Secretariat Portal</p>
+      <div style={{ maxWidth: '400px', margin: '40px auto', padding: '32px', background: '#ffffff', borderRadius: '20px', boxShadow: '0 10px 40px rgba(0,0,0,0.08)', fontFamily: 'system-ui, sans-serif' }}>
+        <div style={{ textAlign: 'center', marginBottom: '30px' }}>
+          <h1 style={{ color: '#1e3a8a', margin: '0 0 5px 0', fontSize: '26px', letterSpacing: '-0.5px' }}>EWUMUNC</h1>
+          <p style={{ color: '#64748b', fontSize: '13px', margin: 0, textTransform: 'uppercase', letterSpacing: '1.5px', fontWeight: '700' }}>Secretariat Portal</p>
         </div>
         
         {connectionError && (
@@ -220,15 +219,31 @@ export default function Scanner() {
           setConfig(newConfig);
           setAppState('TESTING_CONNECTION');
         }}>
-          <div style={{ marginBottom: '15px' }}>
-            <label style={{ display: 'block', fontWeight: '600', color: '#334155', marginBottom: '6px', fontSize: '14px' }}>Google Script URL</label>
-            <input name="url" type="url" required defaultValue={config?.url || ''} placeholder="https://script.google.com/..." style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '14px', outline: 'none' }} />
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', fontWeight: '700', color: '#0f172a', marginBottom: '8px', fontSize: '14px' }}>Google Script Web App URL</label>
+            <input 
+              name="url" 
+              type="url" 
+              required 
+              defaultValue={config?.url || ''} 
+              placeholder="https://script.google.com/..." 
+              // FORCE Colors to override Dark Mode
+              style={{ width: '100%', padding: '14px', borderRadius: '10px', border: '2px solid #e2e8f0', fontSize: '15px', outline: 'none', backgroundColor: '#f8fafc', color: '#0f172a' }} 
+            />
           </div>
-          <div style={{ marginBottom: '25px' }}>
-            <label style={{ display: 'block', fontWeight: '600', color: '#334155', marginBottom: '6px', fontSize: '14px' }}>Target Column Header</label>
-            <input name="column" type="text" required defaultValue={config?.column || ''} placeholder="e.g. Day 1 Check-In" style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '14px', outline: 'none' }} />
+          <div style={{ marginBottom: '30px' }}>
+            <label style={{ display: 'block', fontWeight: '700', color: '#0f172a', marginBottom: '8px', fontSize: '14px' }}>Target Column Header</label>
+            <input 
+              name="column" 
+              type="text" 
+              required 
+              defaultValue={config?.column || ''} 
+              placeholder="e.g. Day 1 Check-In" 
+              // FORCE Colors to override Dark Mode
+              style={{ width: '100%', padding: '14px', borderRadius: '10px', border: '2px solid #e2e8f0', fontSize: '15px', outline: 'none', backgroundColor: '#f8fafc', color: '#0f172a' }} 
+            />
           </div>
-          <button type="submit" style={{ width: '100%', background: '#1e3a8a', color: 'white', padding: '14px', borderRadius: '8px', border: 'none', fontWeight: 'bold', fontSize: '16px', cursor: 'pointer' }}>
+          <button type="submit" style={{ width: '100%', background: '#1e3a8a', color: '#ffffff', padding: '16px', borderRadius: '10px', border: 'none', fontWeight: 'bold', fontSize: '16px', cursor: 'pointer', transition: '0.2s', boxShadow: '0 4px 12px rgba(30,58,138,0.2)' }}>
             Connect to Database
           </button>
         </form>
@@ -236,7 +251,7 @@ export default function Scanner() {
     );
   }
 
-  // Helper check for already scanned
+  // Check if status equals 1, '1', or 'present'
   const isAlreadyScanned = scannedUser?.status == 1 || scannedUser?.status === "1" || String(scannedUser?.status).toLowerCase() === "present";
 
   // ==========================================
@@ -248,61 +263,49 @@ export default function Scanner() {
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '20px' }}>
         <div>
-          <h1 style={{ color: '#1e3a8a', margin: '0 0 2px 0', fontSize: '20px', letterSpacing: '-0.5px' }}>EWUMUNC</h1>
+          <h1 style={{ color: '#1e3a8a', margin: '0 0 2px 0', fontSize: '22px', letterSpacing: '-0.5px' }}>EWUMUNC</h1>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <span style={{ display: 'inline-block', width: '8px', height: '8px', background: '#10b981', borderRadius: '50%' }}></span>
-            <span style={{ fontSize: '13px', color: '#10b981', fontWeight: '600' }}>Connected ({config?.column})</span>
+            <span style={{ fontSize: '13px', color: '#10b981', fontWeight: '700' }}>Connected: {config?.column}</span>
           </div>
         </div>
-        <button onClick={resetSetup} style={{ background: '#f1f5f9', color: '#64748b', border: 'none', padding: '6px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer' }}>
+        <button onClick={resetSetup} style={{ background: '#f1f5f9', color: '#475569', border: '1px solid #cbd5e1', padding: '6px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: '700', cursor: 'pointer' }}>
           Disconnect
         </button>
       </div>
 
-      {/* CAMERA MODULE & IDLE STATE */}
-      {appState !== 'RESULT' && (
-        <div style={{ background: '#000', borderRadius: '16px', overflow: 'hidden', boxShadow: '0 10px 25px rgba(0,0,0,0.15)', position: 'relative', marginBottom: '20px', minHeight: '300px', display: 'flex', flexDirection: 'column' }}>
-          
-          {/* Reader Div must always be in DOM for html5-qrcode to bind to it */}
-          <div id="reader" style={{ width: '100%', flexGrow: 1, display: (appState === 'SCANNING' || appState === 'STARTING_CAMERA') ? 'block' : 'none' }}></div>
+      {/* CAMERA MODULE */}
+      <div style={{ background: '#000', borderRadius: '20px', overflow: 'hidden', boxShadow: '0 10px 30px rgba(0,0,0,0.15)', position: 'relative', marginBottom: '20px', minHeight: '300px', display: 'flex', flexDirection: 'column' }}>
+        
+        <div id="reader" style={{ width: '100%', flexGrow: 1, display: (appState === 'IDLE') ? 'none' : 'block' }}></div>
 
-          {/* Idle State - "Start Camera" Button */}
-          {appState === 'IDLE' && (
-            <div style={{ position: 'absolute', inset: 0, background: '#ffffff', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '20px', textAlign: 'center' }}>
-              <div style={{ fontSize: '48px', marginBottom: '15px' }}>📷</div>
-              <h3 style={{ margin: '0 0 20px 0', color: '#0f172a' }}>Scanner Ready</h3>
-              <button onClick={startCamera} style={{ background: '#1e3a8a', color: 'white', border: 'none', padding: '14px 32px', borderRadius: '12px', fontSize: '16px', fontWeight: 'bold', cursor: 'pointer', boxShadow: '0 4px 12px rgba(30, 58, 138, 0.3)', transition: 'transform 0.1s' }}>
-                Tap to Start Camera
-              </button>
-            </div>
-          )}
+        {/* Idle State - "Start Camera" Button */}
+        {appState === 'IDLE' && (
+          <div style={{ position: 'absolute', inset: 0, background: '#ffffff', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '20px', textAlign: 'center' }}>
+            <div style={{ fontSize: '48px', marginBottom: '15px' }}>📷</div>
+            <h3 style={{ margin: '0 0 20px 0', color: '#0f172a' }}>Scanner Ready</h3>
+            <button onClick={startCamera} style={{ background: '#1e3a8a', color: '#ffffff', border: 'none', padding: '14px 32px', borderRadius: '12px', fontSize: '16px', fontWeight: 'bold', cursor: 'pointer', boxShadow: '0 4px 12px rgba(30, 58, 138, 0.3)' }}>
+              Tap to Start Camera
+            </button>
+          </div>
+        )}
 
-          {/* Processing / Starting Overlays */}
-          {(appState === 'PROCESSING' || appState === 'STARTING_CAMERA') && (
-            <div style={{ position: 'absolute', inset: 0, background: 'rgba(30, 58, 138, 0.9)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontWeight: 'bold', fontSize: '16px', backdropFilter: 'blur(4px)' }}>
-              {appState === 'STARTING_CAMERA' ? 'Waking up camera...' : 'Verifying Delegate...'}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* MANUAL UPLOAD (Only show if not processing or showing result) */}
-      {(appState === 'IDLE' || appState === 'SCANNING') && (
-        <button onClick={() => fileInputRef.current?.click()} style={{ width: '100%', background: '#f8fafc', color: '#1e3a8a', border: '1px solid #e2e8f0', padding: '14px', borderRadius: '12px', fontSize: '15px', fontWeight: '600', cursor: 'pointer', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px' }}>
-          Upload QR Image instead
-        </button>
-      )}
-
-      <input type="file" accept="image/*" ref={fileInputRef} onChange={handleFileUpload} style={{ display: 'none' }} />
+        {/* Processing Overlays */}
+        {(appState === 'PROCESSING' || appState === 'STARTING_CAMERA') && (
+          <div style={{ position: 'absolute', inset: 0, background: 'rgba(30, 58, 138, 0.9)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ffffff', fontWeight: 'bold', fontSize: '16px', backdropFilter: 'blur(4px)' }}>
+            {appState === 'STARTING_CAMERA' ? 'Waking up camera...' : 'Verifying Delegate...'}
+          </div>
+        )}
+      </div>
 
       {/* RESULT VERIFICATION CARD */}
       {appState === 'RESULT' && scannedUser && (
-        <section style={{ background: '#ffffff', border: '1px solid #e2e8f0', padding: '24px', borderRadius: '16px', boxShadow: '0 10px 25px rgba(0,0,0,0.08)', textAlign: 'left' }}>
+        <section style={{ background: '#ffffff', border: '1px solid #e2e8f0', padding: '24px', borderRadius: '20px', boxShadow: '0 10px 30px rgba(0,0,0,0.1)', textAlign: 'left', marginBottom: '20px' }}>
           <div style={{ borderBottom: '2px solid #f1f5f9', paddingBottom: '16px', marginBottom: '16px' }}>
             <span style={{ fontSize: '12px', fontWeight: 'bold', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '1px' }}>Delegate Info</span>
-            <h2 style={{ margin: '4px 0', fontSize: '22px', color: '#0f172a' }}>{scannedUser.name}</h2>
-            <p style={{ margin: '0 0 4px 0', color: '#1e3a8a', fontWeight: '700' }}>ID: {scannedUser.id}</p>
-            <p style={{ margin: 0, color: '#64748b', fontWeight: '500', fontSize: '14px' }}>Dept: {scannedUser.dept}</p>
+            <h2 style={{ margin: '4px 0', fontSize: '24px', color: '#0f172a' }}>{scannedUser.name}</h2>
+            <p style={{ margin: '0 0 4px 0', color: '#1e3a8a', fontWeight: '800', fontSize: '18px' }}>ID: {scannedUser.id}</p>
+            <p style={{ margin: 0, color: '#64748b', fontWeight: '600', fontSize: '15px' }}>Dept: {scannedUser.dept}</p>
           </div>
           
           {isAlreadyScanned ? (
@@ -310,16 +313,26 @@ export default function Scanner() {
               ⚠️ ALREADY CHECKED IN
             </div>
           ) : (
-            <button onClick={handleConfirm} style={{ background: '#1e3a8a', color: 'white', border: 'none', padding: '16px', borderRadius: '12px', fontSize: '16px', fontWeight: 'bold', cursor: 'pointer', width: '100%', marginBottom: '12px', boxShadow: '0 4px 6px rgba(30, 58, 138, 0.2)' }}>
-              CONFIRM DELEGATE
+            <button onClick={handleConfirm} style={{ background: '#10b981', color: '#ffffff', border: 'none', padding: '16px', borderRadius: '12px', fontSize: '18px', fontWeight: 'bold', cursor: 'pointer', width: '100%', marginBottom: '12px', boxShadow: '0 4px 12px rgba(16, 185, 129, 0.3)' }}>
+              ✅ CONFIRM ENTRY
             </button>
           )}
           
-          <button onClick={handleCancel} style={{ width: '100%', padding: '14px', background: '#f1f5f9', color: '#475569', borderRadius: '12px', border: 'none', fontSize: '15px', fontWeight: 'bold', cursor: 'pointer' }}>
-            Cancel & Scan Next
+          <button onClick={resumeCamera} style={{ width: '100%', padding: '14px', background: '#f1f5f9', color: '#475569', borderRadius: '12px', border: 'none', fontSize: '16px', fontWeight: 'bold', cursor: 'pointer' }}>
+            {isAlreadyScanned ? 'Scan Next Delegate' : 'Cancel & Scan Next'}
           </button>
         </section>
       )}
+
+      {/* MANUAL UPLOAD (Only show if not showing result) */}
+      {(appState === 'IDLE' || appState === 'SCANNING') && (
+        <button onClick={() => fileInputRef.current?.click()} style={{ width: '100%', background: '#ffffff', color: '#1e3a8a', border: '2px solid #e2e8f0', padding: '16px', borderRadius: '16px', fontSize: '15px', fontWeight: '700', cursor: 'pointer', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', boxShadow: '0 4px 6px rgba(0,0,0,0.02)' }}>
+          📷 Upload QR from Gallery
+        </button>
+      )}
+
+      <input type="file" accept="image/*" ref={fileInputRef} onChange={handleFileUpload} style={{ display: 'none' }} />
+
     </div>
   );
 }
