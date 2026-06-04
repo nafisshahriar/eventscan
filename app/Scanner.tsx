@@ -1,348 +1,760 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from 'react';
-import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
 
-interface StudentData {
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface MemberData {
   id: string;
   name: string;
   dept: string;
-  status: any;
+  status: string | number;
   row: number;
   error?: string;
 }
 
-interface AppConfig {
+interface Config {
   url: string;
   column: string;
 }
 
-type AppState = 
-  | 'INITIALIZING' 
-  | 'SETUP' 
-  | 'TESTING_CONNECTION' 
-  | 'IDLE' 
-  | 'STARTING_CAMERA' 
-  | 'SCANNING' 
-  | 'PROCESSING' 
-  | 'RESULT';
+type Phase =
+  | "boot"
+  | "connecting"
+  | "setup"
+  | "idle"
+  | "scanning"
+  | "processing"
+  | "result";
+
+const STORAGE_KEY = "ewumunc_scanner_v2";
+
+// ─── Retry queue for fire-and-forget POSTs ────────────────────────────────────
+
+async function postWithRetry(
+  url: string,
+  body: object,
+  attempts = 3
+): Promise<void> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) return;
+    } catch {
+      if (i === attempts - 1) console.error("POST failed after retries");
+      await new Promise((r) => setTimeout(r, 600 * (i + 1)));
+    }
+  }
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Scanner() {
-  const [appState, setAppState] = useState<AppState>('INITIALIZING');
-  const [config, setConfig] = useState<AppConfig | null>(null);
-  const [scannedUser, setScannedUser] = useState<StudentData | null>(null);
-  const [connectionError, setConnectionError] = useState<boolean>(false);
-  
+  const [phase, setPhase] = useState<Phase>("boot");
+  const [config, setConfig] = useState<Config | null>(null);
+  const [member, setMember] = useState<MemberData | null>(null);
+  const [connError, setConnError] = useState(false);
+  const [flashMessage, setFlashMessage] = useState<{
+    text: string;
+    type: "error" | "warn";
+  } | null>(null);
+
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const canScanRef = useRef<boolean>(true); // Prevents double-scanning
+  const lockRef = useRef(false); // scan gate: true = ignore frames
+  const readerReady = useRef(false);
 
-  // 1. Safe Initialization
+  // ── Boot: restore saved config ──────────────────────────────────────────────
   useEffect(() => {
-    const savedConfig = localStorage.getItem('ewumuncScannerConfig');
-    if (savedConfig) {
-      setConfig(JSON.parse(savedConfig));
-      setAppState('TESTING_CONNECTION');
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        setConfig(JSON.parse(saved));
+        setPhase("connecting");
+      } catch {
+        setPhase("setup");
+      }
     } else {
-      setAppState('SETUP');
+      setPhase("setup");
     }
   }, []);
 
-  // 2. Test Connection
+  // ── Test connection ─────────────────────────────────────────────────────────
   useEffect(() => {
-    if (appState !== 'TESTING_CONNECTION' || !config) return;
+    if (phase !== "connecting" || !config) return;
+    let cancelled = false;
 
-    const testConnection = async () => {
+    (async () => {
       try {
-        const response = await fetch(`${config.url}?id=PING_TEST&col=${encodeURIComponent(config.column)}`);
-        if (response.ok) {
-          setConnectionError(false);
-          setAppState('IDLE');
-        } else {
-          throw new Error('Bad response');
+        const res = await fetch(
+          `${config.url}?id=PING&col=${encodeURIComponent(config.column)}`,
+          { signal: AbortSignal.timeout(8000) }
+        );
+        if (!cancelled) {
+          setConnError(!res.ok);
+          setPhase(res.ok ? "idle" : "setup");
         }
-      } catch (err) {
-        setConnectionError(true);
-        setAppState('SETUP');
+      } catch {
+        if (!cancelled) {
+          setConnError(true);
+          setPhase("setup");
+        }
       }
-    };
+    })();
 
-    testConnection();
-  }, [appState, config]);
+    return () => { cancelled = true; };
+  }, [phase, config]);
 
-  // 3. Camera Controls (Optimized for continuous scanning)
-  // 3. Camera Controls (Maximum Performance Optimized)
-// 3. Camera Controls (Maximum Performance Optimized)
-  const startCamera = async () => {
-    setAppState('STARTING_CAMERA');
-    try {
-      if (!scannerRef.current) {
-        // ⚡ SPEEDUP 1: Restrict formats HERE in the constructor
-        scannerRef.current = new Html5Qrcode("reader", {
-          formatsToSupport: [ Html5QrcodeSupportedFormats.QR_CODE ],
-          verbose: false // <-- This completely satisfies TypeScript
-        });
-      }
-      
-      await scannerRef.current.start(
-        { facingMode: "environment" }, 
-        { 
-          fps: 10, 
-          qrbox: 250, 
-          disableFlip: true // ⚡ SPEEDUP 2: Stop checking for mirrored codes
-        },
-        async (decodedText) => {
-          if (canScanRef.current) {
-            canScanRef.current = false;
-            
-            // Freeze camera frame instantly
-            try { scannerRef.current?.pause(true); } catch(e){} 
-            
-            await processScan(decodedText);
-          }
-        },
-        () => {} // Ignore frame errors silently
-      );
-      setAppState('SCANNING');
-    } catch (err) {
-      console.error("Camera failed to start:", err);
-      alert("Camera access denied or unavailable. Please use manual upload.");
-      setAppState('IDLE');
-    }
-  };
+  // ── Cleanup camera on unmount ───────────────────────────────────────────────
+  useEffect(() => {
+    return () => { stopCamera(); };
+  }, []);
 
-  // RESUME camera for the next person
-  const resumeCamera = () => {
-    setScannedUser(null);
-    setAppState('SCANNING');
-    try { scannerRef.current?.resume(); } catch(e){}
-    
-    // Slight delay before unlocking the scan gate to prevent accidental double-scans
-    setTimeout(() => { canScanRef.current = true; }, 400); 
-  };
+  // ── Flash helper ────────────────────────────────────────────────────────────
+  const flash = useCallback(
+    (text: string, type: "error" | "warn" = "error") => {
+      setFlashMessage({ text, type });
+      setTimeout(() => setFlashMessage(null), 3500);
+    },
+    []
+  );
 
-  // Completely destroy camera only if user logs out/disconnects
-  const hardStopCamera = async () => {
-    if (scannerRef.current) {
+  // ── Scan processor ──────────────────────────────────────────────────────────
+  const processScan = useCallback(
+    async (raw: string) => {
+      if (!config) return;
+      setPhase("processing");
+
       try {
-        await scannerRef.current.stop();
-        scannerRef.current.clear();
-      } catch (err) { /* ignore */ }
-    }
-  };
+        const res = await fetch(
+          `${config.url}?id=${encodeURIComponent(raw)}&col=${encodeURIComponent(config.column)}`,
+          { signal: AbortSignal.timeout(10000) }
+        );
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data: MemberData = await res.json();
 
-  // 4. Data Processing
-  const processScan = async (id: string) => {
-    setAppState('PROCESSING');
-    try {
-      const response = await fetch(`${config!.url}?id=${encodeURIComponent(id)}&col=${encodeURIComponent(config!.column)}`);
-      const data: StudentData = await response.json();
-      
-      if (data.error) {
-        alert("⚠️ Delegate ID not found in database.");
-        resumeCamera(); // Go straight back to scanning
-      } else {
-        setScannedUser(data);
-        setAppState('RESULT');
+        if (data.error) {
+          flash("ID not found in database.", "warn");
+          resumeScanning();
+        } else {
+          setMember(data);
+          setPhase("result");
+        }
+      } catch {
+        flash("Network error — check your connection.");
+        resumeScanning();
       }
-    } catch (err) {
-      alert("❌ Network error. Please check your connection.");
-      resumeCamera();
+    },
+    [config, flash]
+  );
+
+  // ── Camera: init & start ────────────────────────────────────────────────────
+  // KEY FIX: #reader must exist in DOM before Html5Qrcode is created.
+  // We always render it; visibility is toggled via CSS opacity/pointer-events,
+  // NOT display:none which removes it from DOM and breaks the library.
+  const startCamera = useCallback(async () => {
+    lockRef.current = false;
+
+    if (!scannerRef.current) {
+      // Create instance against the always-rendered #reader div
+      scannerRef.current = new Html5Qrcode("qr-reader", {
+        formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE],
+        verbose: false,
+      });
+      readerReady.current = false;
     }
-  };
 
-  // 5. Actions
-  const handleConfirm = () => {
-    if (!scannedUser || !config) return;
-    
-    // Background sync
-    fetch(config.url, {
-      method: 'POST',
-      body: JSON.stringify({ row: scannedUser.row, col: config.column, val: 1 }),
-    }).catch(() => console.error("Sync failed"));
-
-    resumeCamera(); // Instantly jump back to the live scanner
-  };
-
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    
-    setAppState('PROCESSING');
-    if (!scannerRef.current) scannerRef.current = new Html5Qrcode("reader");
-    
-    try {
-      const result = await scannerRef.current.scanFile(file, true);
-      canScanRef.current = false;
-      await processScan(result);
-    } catch (err) {
-      alert("Could not detect a clear QR code. Please try again.");
-      setAppState('IDLE');
+    if (!readerReady.current) {
+      try {
+        await scannerRef.current.start(
+          { facingMode: "environment" },
+          { fps: 12, qrbox: { width: 240, height: 240 }, disableFlip: true },
+          (decoded) => {
+            if (!lockRef.current) {
+              lockRef.current = true;
+              try { scannerRef.current?.pause(true); } catch { }
+              processScan(decoded);
+            }
+          },
+          () => {} // suppress frame-level errors
+        );
+        readerReady.current = true;
+      } catch (err) {
+        flash("Camera access denied. Try uploading a QR image instead.", "warn");
+        setPhase("idle");
+        return;
+      }
+    } else {
+      // Camera already running — just resume
+      try { scannerRef.current?.resume(); } catch { }
     }
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  };
 
-  const resetSetup = async () => {
-    await hardStopCamera();
-    localStorage.removeItem('ewumuncScannerConfig');
+    setPhase("scanning");
+  }, [processScan, flash]);
+
+  const resumeScanning = useCallback(() => {
+    setMember(null);
+    if (readerReady.current && scannerRef.current) {
+      try { scannerRef.current.resume(); } catch { }
+      setTimeout(() => { lockRef.current = false; }, 500);
+      setPhase("scanning");
+    } else {
+      setPhase("idle");
+    }
+  }, []);
+
+  const stopCamera = useCallback(async () => {
+    if (scannerRef.current && readerReady.current) {
+      try { await scannerRef.current.stop(); } catch {}
+      try { scannerRef.current.clear(); } catch {}
+      readerReady.current = false;
+    }
+    scannerRef.current = null;
+  }, []);
+
+  // ── Confirm check-in ────────────────────────────────────────────────────────
+  const confirmEntry = useCallback(() => {
+    if (!member || !config) return;
+    postWithRetry(config.url, { row: member.row, col: config.column, val: 1 });
+    resumeScanning();
+  }, [member, config, resumeScanning]);
+
+  // ── File upload fallback ─────────────────────────────────────────────────────
+  const handleFile = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      if (fileInputRef.current) fileInputRef.current.value = "";
+
+      // Need a temporary scanner instance if camera isn't active
+      let tempScanner: Html5Qrcode | null = null;
+      setPhase("processing");
+
+      try {
+        if (!scannerRef.current) {
+          tempScanner = new Html5Qrcode("qr-reader", { verbose: false });
+        }
+        const inst = scannerRef.current ?? tempScanner!;
+        const result = await inst.scanFile(file, true);
+        if (tempScanner) {
+          try { tempScanner.clear(); } catch {}
+          tempScanner = null;
+        }
+        lockRef.current = true;
+        await processScan(result);
+      } catch {
+        if (tempScanner) { try { tempScanner.clear(); } catch {} }
+        lockRef.current = false;
+        flash("No QR code found in image. Try a clearer photo.", "warn");
+        setPhase(readerReady.current ? "scanning" : "idle");
+      }
+    },
+    [processScan, flash]
+  );
+
+  // ── Disconnect / reset ───────────────────────────────────────────────────────
+  const disconnect = useCallback(async () => {
+    await stopCamera();
+    localStorage.removeItem(STORAGE_KEY);
     setConfig(null);
-    setAppState('SETUP');
-  };
+    setMember(null);
+    setConnError(false);
+    setPhase("setup");
+  }, [stopCamera]);
 
-  // ==========================================
-  // RENDER: INITIALIZING / LOADING
-  // ==========================================
-  if (appState === 'INITIALIZING' || appState === 'TESTING_CONNECTION') {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', fontFamily: 'system-ui' }}>
-        <div style={{ width: '40px', height: '40px', border: '4px solid #e2e8f0', borderTop: '4px solid #1e3a8a', borderRadius: '50%', animation: 'spin 1s linear infinite', marginBottom: '20px' }} />
-        <p style={{ color: '#475569', fontWeight: '600', fontSize: '16px' }}>
-          {appState === 'INITIALIZING' ? 'Loading Portal...' : 'Securing Connection...'}
-        </p>
-        <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
-      </div>
-    );
-  }
+  // ── Setup form submit ────────────────────────────────────────────────────────
+  const handleSetup = useCallback(
+    (e: React.FormEvent<HTMLFormElement>) => {
+      e.preventDefault();
+      const fd = new FormData(e.currentTarget);
+      const next: Config = {
+        url: (fd.get("url") as string).trim(),
+        column: (fd.get("column") as string).trim(),
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      setConfig(next);
+      setConnError(false);
+      setPhase("connecting");
+    },
+    []
+  );
 
-  // ==========================================
-  // RENDER: SETUP SCREEN (Fixed Colors)
-  // ==========================================
-  if (appState === 'SETUP') {
-    return (
-      <div style={{ maxWidth: '400px', margin: '40px auto', padding: '32px', background: '#ffffff', borderRadius: '20px', boxShadow: '0 10px 40px rgba(0,0,0,0.08)', fontFamily: 'system-ui, sans-serif' }}>
-        <div style={{ textAlign: 'center', marginBottom: '30px' }}>
-          <h1 style={{ color: '#1e3a8a', margin: '0 0 5px 0', fontSize: '26px', letterSpacing: '-0.5px' }}>EWUMUNC</h1>
-          <p style={{ color: '#64748b', fontSize: '13px', margin: 0, textTransform: 'uppercase', letterSpacing: '1.5px', fontWeight: '700' }}>Secretariat Portal</p>
-        </div>
-        
-        {connectionError && (
-          <div style={{ background: '#fef2f2', color: '#b91c1c', padding: '12px', borderRadius: '8px', fontSize: '14px', marginBottom: '20px', border: '1px solid #f87171', textAlign: 'center' }}>
-            <strong>Connection Failed!</strong><br/>Verify your Google Script URL and try again.
-          </div>
-        )}
-        
-        <form onSubmit={(e) => {
-          e.preventDefault();
-          const formData = new FormData(e.currentTarget);
-          const newConfig = { url: formData.get('url') as string, column: formData.get('column') as string };
-          localStorage.setItem('ewumuncScannerConfig', JSON.stringify(newConfig));
-          setConfig(newConfig);
-          setAppState('TESTING_CONNECTION');
-        }}>
-          <div style={{ marginBottom: '20px' }}>
-            <label style={{ display: 'block', fontWeight: '700', color: '#0f172a', marginBottom: '8px', fontSize: '14px' }}>Google Script Web App URL</label>
-            <input 
-              name="url" 
-              type="url" 
-              required 
-              defaultValue={config?.url || ''} 
-              placeholder="https://script.google.com/..." 
-              // FORCE Colors to override Dark Mode
-              style={{ width: '100%', padding: '14px', borderRadius: '10px', border: '2px solid #e2e8f0', fontSize: '15px', outline: 'none', backgroundColor: '#f8fafc', color: '#0f172a' }} 
-            />
-          </div>
-          <div style={{ marginBottom: '30px' }}>
-            <label style={{ display: 'block', fontWeight: '700', color: '#0f172a', marginBottom: '8px', fontSize: '14px' }}>Target Column Header</label>
-            <input 
-              name="column" 
-              type="text" 
-              required 
-              defaultValue={config?.column || ''} 
-              placeholder="e.g. Day 1 Check-In" 
-              // FORCE Colors to override Dark Mode
-              style={{ width: '100%', padding: '14px', borderRadius: '10px', border: '2px solid #e2e8f0', fontSize: '15px', outline: 'none', backgroundColor: '#f8fafc', color: '#0f172a' }} 
-            />
-          </div>
-          <button type="submit" style={{ width: '100%', background: '#1e3a8a', color: '#ffffff', padding: '16px', borderRadius: '10px', border: 'none', fontWeight: 'bold', fontSize: '16px', cursor: 'pointer', transition: '0.2s', boxShadow: '0 4px 12px rgba(30,58,138,0.2)' }}>
-            Connect to Database
-          </button>
-        </form>
-      </div>
-    );
-  }
+  // ─── Status helpers ──────────────────────────────────────────────────────────
+  const alreadyCheckedIn =
+    member?.status == 1 ||
+    member?.status === "1" ||
+    String(member?.status).toLowerCase() === "present";
 
-  // Check if status equals 1, '1', or 'present'
-  const isAlreadyScanned = scannedUser?.status == 1 || scannedUser?.status === "1" || String(scannedUser?.status).toLowerCase() === "present";
+  const isLoading = phase === "boot" || phase === "connecting";
 
-  // ==========================================
-  // RENDER: MAIN APP INTERFACE
-  // ==========================================
+  // ─── Render ──────────────────────────────────────────────────────────────────
   return (
-    <div style={{ width: '100%', maxWidth: '400px', margin: '0 auto', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
-      
-      {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '20px' }}>
-        <div>
-          <h1 style={{ color: '#1e3a8a', margin: '0 0 2px 0', fontSize: '22px', letterSpacing: '-0.5px' }}>EWUMUNC</h1>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <span style={{ display: 'inline-block', width: '8px', height: '8px', background: '#10b981', borderRadius: '50%' }}></span>
-            <span style={{ fontSize: '13px', color: '#10b981', fontWeight: '700' }}>Connected: {config?.column}</span>
-          </div>
-        </div>
-        <button onClick={resetSetup} style={{ background: '#f1f5f9', color: '#475569', border: '1px solid #cbd5e1', padding: '6px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: '700', cursor: 'pointer' }}>
-          Disconnect
-        </button>
-      </div>
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@500&display=swap');
 
-      {/* CAMERA MODULE */}
-      <div style={{ background: '#000', borderRadius: '20px', overflow: 'hidden', boxShadow: '0 10px 30px rgba(0,0,0,0.15)', position: 'relative', marginBottom: '20px', minHeight: '300px', display: 'flex', flexDirection: 'column' }}>
-        
-        <div id="reader" style={{ width: '100%', flexGrow: 1, display: (appState === 'IDLE') ? 'none' : 'block' }}></div>
+        .sc-root {
+          font-family: 'DM Sans', system-ui, sans-serif;
+          min-height: 100dvh;
+          background: #0a0f1e;
+          color: #e2e8f0;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          padding: 0 0 40px;
+        }
 
-        {/* Idle State - "Start Camera" Button */}
-        {appState === 'IDLE' && (
-          <div style={{ position: 'absolute', inset: 0, background: '#ffffff', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '20px', textAlign: 'center' }}>
-            <div style={{ fontSize: '48px', marginBottom: '15px' }}>📷</div>
-            <h3 style={{ margin: '0 0 20px 0', color: '#0f172a' }}>Scanner Ready</h3>
-            <button onClick={startCamera} style={{ background: '#1e3a8a', color: '#ffffff', border: 'none', padding: '14px 32px', borderRadius: '12px', fontSize: '16px', fontWeight: 'bold', cursor: 'pointer', boxShadow: '0 4px 12px rgba(30, 58, 138, 0.3)' }}>
-              Tap to Start Camera
-            </button>
-          </div>
-        )}
+        /* ── Header bar ── */
+        .sc-header {
+          width: 100%;
+          max-width: 440px;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          padding: 20px 20px 0;
+        }
+        .sc-logo { font-size: 15px; font-weight: 600; letter-spacing: 3px; color: #7dd3fc; }
+        .sc-logo-sub { font-size: 10px; color: #475569; letter-spacing: 2px; margin-top: 2px; }
 
-        {/* Processing Overlays */}
-        {(appState === 'PROCESSING' || appState === 'STARTING_CAMERA') && (
-          <div style={{ position: 'absolute', inset: 0, background: 'rgba(30, 58, 138, 0.9)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ffffff', fontWeight: 'bold', fontSize: '16px', backdropFilter: 'blur(4px)' }}>
-            {appState === 'STARTING_CAMERA' ? 'Waking up camera...' : 'Verifying Delegate...'}
-          </div>
-        )}
-      </div>
+        /* ── Card shell ── */
+        .sc-card {
+          width: 100%;
+          max-width: 440px;
+          background: #111827;
+          border: 1px solid #1e2d45;
+          border-radius: 20px;
+          overflow: hidden;
+          margin: 16px 20px 0;
+        }
 
-      {/* RESULT VERIFICATION CARD */}
-      {appState === 'RESULT' && scannedUser && (
-        <section style={{ background: '#ffffff', border: '1px solid #e2e8f0', padding: '24px', borderRadius: '20px', boxShadow: '0 10px 30px rgba(0,0,0,0.1)', textAlign: 'left', marginBottom: '20px' }}>
-          <div style={{ borderBottom: '2px solid #f1f5f9', paddingBottom: '16px', marginBottom: '16px' }}>
-            <span style={{ fontSize: '12px', fontWeight: 'bold', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '1px' }}>Delegate Info</span>
-            <h2 style={{ margin: '4px 0', fontSize: '24px', color: '#0f172a' }}>{scannedUser.name}</h2>
-            <p style={{ margin: '0 0 4px 0', color: '#1e3a8a', fontWeight: '800', fontSize: '18px' }}>ID: {scannedUser.id}</p>
-            <p style={{ margin: 0, color: '#64748b', fontWeight: '600', fontSize: '15px' }}>Dept: {scannedUser.dept}</p>
+        /* ── Camera viewport ── */
+        .sc-viewport {
+          position: relative;
+          width: 100%;
+          aspect-ratio: 1 / 1;
+          background: #000;
+          overflow: hidden;
+        }
+
+        /* Always rendered — visibility toggled so html5-qrcode can mount */
+        #qr-reader {
+          width: 100% !important;
+          height: 100% !important;
+          border: none !important;
+        }
+        #qr-reader video { object-fit: cover; width: 100%; height: 100%; }
+        /* Hide the library's own UI chrome */
+        #qr-reader img, #qr-reader button,
+        #qr-reader select, #qr-reader span { display: none !important; }
+
+        .sc-overlay {
+          position: absolute;
+          inset: 0;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          background: #0a0f1e;
+          z-index: 10;
+          gap: 16px;
+        }
+        .sc-overlay.transparent {
+          background: transparent;
+          pointer-events: none;
+        }
+
+        /* Scan frame */
+        .sc-frame {
+          width: 220px;
+          height: 220px;
+          position: relative;
+        }
+        .sc-frame::before, .sc-frame::after,
+        .sc-corner-bl, .sc-corner-br {
+          content: '';
+          position: absolute;
+          width: 32px;
+          height: 32px;
+          border-color: #7dd3fc;
+          border-style: solid;
+        }
+        .sc-frame::before { top: 0; left: 0; border-width: 3px 0 0 3px; border-radius: 6px 0 0 0; }
+        .sc-frame::after  { top: 0; right: 0; border-width: 3px 3px 0 0; border-radius: 0 6px 0 0; }
+        .sc-corner-bl { bottom: 0; left: 0; border-width: 0 0 3px 3px; border-radius: 0 0 0 6px; }
+        .sc-corner-br { bottom: 0; right: 0; border-width: 0 3px 3px 0; border-radius: 0 0 6px 0; }
+        .sc-scan-line {
+          position: absolute;
+          left: 4px; right: 4px;
+          height: 2px;
+          background: linear-gradient(90deg, transparent, #7dd3fc, transparent);
+          animation: scan-sweep 2s ease-in-out infinite;
+        }
+        @keyframes scan-sweep {
+          0%   { top: 8px; opacity: 0; }
+          10%  { opacity: 1; }
+          90%  { opacity: 1; }
+          100% { top: calc(100% - 8px); opacity: 0; }
+        }
+
+        /* Spinner */
+        .sc-spinner {
+          width: 36px; height: 36px;
+          border: 3px solid #1e2d45;
+          border-top-color: #7dd3fc;
+          border-radius: 50%;
+          animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Status dot */
+        .sc-dot {
+          width: 8px; height: 8px;
+          border-radius: 50%;
+          animation: pulse 2s ease-in-out infinite;
+        }
+        .sc-dot.green { background: #34d399; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+        /* ── Bottom panel ── */
+        .sc-panel {
+          padding: 20px;
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+
+        /* Buttons */
+        .sc-btn {
+          width: 100%;
+          padding: 15px 20px;
+          border-radius: 12px;
+          border: none;
+          font-family: inherit;
+          font-size: 15px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: transform 0.1s, opacity 0.1s;
+          letter-spacing: 0.3px;
+        }
+        .sc-btn:active { transform: scale(0.97); }
+        .sc-btn.primary { background: #0ea5e9; color: #fff; }
+        .sc-btn.primary:hover { background: #38bdf8; }
+        .sc-btn.success { background: #059669; color: #fff; }
+        .sc-btn.success:hover { background: #10b981; }
+        .sc-btn.ghost {
+          background: transparent;
+          color: #94a3b8;
+          border: 1px solid #1e2d45;
+        }
+        .sc-btn.ghost:hover { background: #1e2d45; color: #cbd5e1; }
+        .sc-btn.danger { background: #7f1d1d22; color: #fca5a5; border: 1px solid #7f1d1d55; }
+        .sc-btn.danger:hover { background: #7f1d1d44; }
+
+        /* Member result card */
+        .sc-member {
+          background: #0d1526;
+          border-radius: 14px;
+          border: 1px solid #1e2d45;
+          padding: 18px;
+        }
+        .sc-member-id {
+          font-family: 'DM Mono', monospace;
+          font-size: 11px;
+          color: #7dd3fc;
+          letter-spacing: 2px;
+          margin-bottom: 6px;
+        }
+        .sc-member-name { font-size: 22px; font-weight: 600; color: #f1f5f9; margin: 0 0 4px; }
+        .sc-member-dept { font-size: 14px; color: #64748b; }
+
+        .sc-already-in {
+          background: #451a1a44;
+          border: 1px solid #7f1d1d66;
+          border-radius: 10px;
+          padding: 12px 16px;
+          color: #fca5a5;
+          font-size: 14px;
+          font-weight: 600;
+          text-align: center;
+          letter-spacing: 0.5px;
+        }
+
+        /* Flash message */
+        .sc-flash {
+          max-width: 440px;
+          width: calc(100% - 40px);
+          margin: 12px 20px 0;
+          border-radius: 10px;
+          padding: 12px 16px;
+          font-size: 14px;
+          font-weight: 500;
+          text-align: center;
+          animation: fadeIn 0.2s ease;
+        }
+        .sc-flash.error { background: #451a1a44; border: 1px solid #ef444444; color: #fca5a5; }
+        .sc-flash.warn  { background: #451a0044; border: 1px solid #eab30844; color: #fcd34d; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; } }
+
+        /* Setup form */
+        .sc-setup {
+          width: 100%;
+          max-width: 440px;
+          padding: 0 20px;
+          margin-top: 12px;
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+        }
+        .sc-field label {
+          display: block;
+          font-size: 12px;
+          font-weight: 600;
+          letter-spacing: 1.5px;
+          color: #475569;
+          margin-bottom: 8px;
+          text-transform: uppercase;
+        }
+        .sc-field input {
+          width: 100%;
+          box-sizing: border-box;
+          background: #111827;
+          border: 1px solid #1e2d45;
+          border-radius: 10px;
+          padding: 13px 16px;
+          color: #e2e8f0;
+          font-family: inherit;
+          font-size: 15px;
+          outline: none;
+          transition: border-color 0.15s;
+        }
+        .sc-field input:focus { border-color: #0ea5e9; }
+        .sc-field input::placeholder { color: #334155; }
+
+        .sc-divider {
+          height: 1px;
+          background: #1e2d45;
+          margin: 0;
+        }
+
+        .sc-status-row {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          font-size: 13px;
+          color: #34d399;
+          font-weight: 500;
+        }
+
+        .sc-idle-icon {
+          font-size: 40px;
+          margin-bottom: 4px;
+          opacity: 0.6;
+        }
+        .sc-idle-label {
+          font-size: 13px;
+          color: #475569;
+          letter-spacing: 1px;
+        }
+      `}</style>
+
+      <div className="sc-root">
+        {/* ── Header ── */}
+        <header className="sc-header">
+          <div>
+            <div className="sc-logo">EWUMUNC</div>
+            <div className="sc-logo-sub">SECRETARIAT PORTAL</div>
           </div>
-          
-          {isAlreadyScanned ? (
-            <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', color: '#b91c1c', padding: '16px', borderRadius: '12px', fontWeight: 'bold', textAlign: 'center', marginBottom: '15px' }}>
-              ⚠️ ALREADY CHECKED IN
+          {(phase !== "setup" && phase !== "boot" && phase !== "connecting") && (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+              <div className="sc-status-row">
+                <div className="sc-dot green" />
+                <span>{config?.column}</span>
+              </div>
+              <button
+                className="sc-btn ghost"
+                style={{ width: "auto", padding: "5px 12px", fontSize: 12 }}
+                onClick={disconnect}
+              >
+                Disconnect
+              </button>
             </div>
-          ) : (
-            <button onClick={handleConfirm} style={{ background: '#10b981', color: '#ffffff', border: 'none', padding: '16px', borderRadius: '12px', fontSize: '18px', fontWeight: 'bold', cursor: 'pointer', width: '100%', marginBottom: '12px', boxShadow: '0 4px 12px rgba(16, 185, 129, 0.3)' }}>
-              ✅ CONFIRM ENTRY
-            </button>
           )}
-          
-          <button onClick={resumeCamera} style={{ width: '100%', padding: '14px', background: '#f1f5f9', color: '#475569', borderRadius: '12px', border: 'none', fontSize: '16px', fontWeight: 'bold', cursor: 'pointer' }}>
-            {isAlreadyScanned ? 'Scan Next Delegate' : 'Cancel & Scan Next'}
-          </button>
-        </section>
-      )}
+        </header>
 
-      {/* MANUAL UPLOAD (Only show if not showing result) */}
-      {(appState === 'IDLE' || appState === 'SCANNING') && (
-        <button onClick={() => fileInputRef.current?.click()} style={{ width: '100%', background: '#ffffff', color: '#1e3a8a', border: '2px solid #e2e8f0', padding: '16px', borderRadius: '16px', fontSize: '15px', fontWeight: '700', cursor: 'pointer', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', boxShadow: '0 4px 6px rgba(0,0,0,0.02)' }}>
-          📷 Upload QR from Gallery
-        </button>
-      )}
+        {/* ── Flash message ── */}
+        {flashMessage && (
+          <div className={`sc-flash ${flashMessage.type}`}>
+            {flashMessage.text}
+          </div>
+        )}
 
-      <input type="file" accept="image/*" ref={fileInputRef} onChange={handleFileUpload} style={{ display: 'none' }} />
+        {/* ── Setup screen ── */}
+        {(phase === "setup") && (
+          <form className="sc-setup" onSubmit={handleSetup}>
+            {connError && (
+              <div className="sc-flash error" style={{ margin: 0, width: "100%", boxSizing: "border-box" }}>
+                Connection failed — verify the URL and try again.
+              </div>
+            )}
+            <div className="sc-field">
+              <label>Google Script URL</label>
+              <input
+                name="url"
+                type="url"
+                required
+                autoComplete="off"
+                defaultValue={config?.url ?? ""}
+                placeholder="https://script.google.com/…"
+              />
+            </div>
+            <div className="sc-field">
+              <label>Target Column</label>
+              <input
+                name="column"
+                type="text"
+                required
+                defaultValue={config?.column ?? ""}
+                placeholder="e.g. Day 1 Check-In"
+              />
+            </div>
+            <button type="submit" className="sc-btn primary">
+              Connect to Database
+            </button>
+          </form>
+        )}
 
-    </div>
+        {/* ── Camera card (always rendered so #qr-reader stays in DOM) ── */}
+        {phase !== "setup" && (
+          <>
+            <div
+              className="sc-card"
+              style={{
+                // Collapse visually during boot/connecting
+                opacity: isLoading ? 0.4 : 1,
+                pointerEvents: isLoading ? "none" : "auto",
+              }}
+            >
+              <div className="sc-viewport">
+                {/* ALWAYS rendered — this is the critical fix */}
+                <div
+                  id="qr-reader"
+                  style={{
+                    // Visible only when camera is active
+                    opacity: phase === "scanning" ? 1 : 0,
+                    pointerEvents: "none",
+                  }}
+                />
+
+                {/* Idle overlay */}
+                {phase === "idle" && (
+                  <div className="sc-overlay">
+                    <div className="sc-idle-icon">⬡</div>
+                    <div className="sc-idle-label">SCANNER READY</div>
+                  </div>
+                )}
+
+                {/* Boot / connecting overlay */}
+                {isLoading && (
+                  <div className="sc-overlay">
+                    <div className="sc-spinner" />
+                    <span style={{ fontSize: 13, color: "#475569" }}>
+                      {phase === "boot" ? "Loading…" : "Connecting…"}
+                    </span>
+                  </div>
+                )}
+
+                {/* Starting camera overlay */}
+                {phase === "processing" && (
+                  <div className="sc-overlay">
+                    <div className="sc-spinner" />
+                    <span style={{ fontSize: 13, color: "#7dd3fc" }}>Verifying…</span>
+                  </div>
+                )}
+
+                {/* Active scan frame (shown on top of live feed) */}
+                {phase === "scanning" && (
+                  <div className="sc-overlay transparent">
+                    <div className="sc-frame">
+                      <div className="sc-corner-bl" />
+                      <div className="sc-corner-br" />
+                      <div className="sc-scan-line" />
+                    </div>
+                  </div>
+                )}
+
+                {/* Result card overlaid on frozen frame */}
+                {phase === "result" && member && (
+                  <div
+                    className="sc-overlay"
+                    style={{ background: "#0a0f1eee", padding: 20, justifyContent: "flex-start", paddingTop: 32 }}
+                  >
+                    <div className="sc-member" style={{ width: "100%", boxSizing: "border-box" }}>
+                      <div className="sc-member-id">ID · {member.id}</div>
+                      <div className="sc-member-name">{member.name}</div>
+                      <div className="sc-member-dept">{member.dept}</div>
+                    </div>
+
+                    {alreadyCheckedIn ? (
+                      <div className="sc-already-in" style={{ width: "100%", boxSizing: "border-box", marginTop: 12 }}>
+                        ⚠ Already checked in
+                      </div>
+                    ) : null}
+
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", marginTop: 16 }}>
+                      {!alreadyCheckedIn && (
+                        <button className="sc-btn success" onClick={confirmEntry}>
+                          Confirm Entry
+                        </button>
+                      )}
+                      <button className="sc-btn ghost" onClick={resumeScanning}>
+                        {alreadyCheckedIn ? "Scan Next" : "Cancel"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* ── Panel below camera ── */}
+              {!isLoading && (
+                <div className="sc-panel">
+                  {phase === "idle" && (
+                    <button className="sc-btn primary" onClick={startCamera}>
+                      Start Camera
+                    </button>
+                  )}
+                  {phase === "scanning" && (
+                    <p style={{ margin: 0, fontSize: 13, color: "#334155", textAlign: "center" }}>
+                      Point camera at a QR code
+                    </p>
+                  )}
+                  <div className="sc-divider" />
+                  <button
+                    className="sc-btn ghost"
+                    onClick={() => fileInputRef.current?.click()}
+                    style={{ fontSize: 13 }}
+                  >
+                    Upload QR Image from Gallery
+                  </button>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* Hidden file input */}
+        <input
+          type="file"
+          accept="image/*"
+          ref={fileInputRef}
+          onChange={handleFile}
+          style={{ display: "none" }}
+        />
+      </div>
+    </>
   );
 }
