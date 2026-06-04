@@ -80,7 +80,16 @@ export default function Scanner() {
       
       await scannerRef.current.start(
         { facingMode: "environment" }, 
-        { fps: 10, qrbox: { width: 250, height: 250 }, aspectRatio: 1.0 },
+        { 
+          fps: 15, // Scans 15 times per second
+          // Dynamically size the box to 70% of the screen
+          qrbox: (viewfinderWidth, viewfinderHeight) => {
+            const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+            const size = Math.floor(minEdge * 0.7);
+            return { width: size, height: size };
+          },
+          aspectRatio: 1.0
+        },
         async (decodedText) => {
           if (canScanRef.current) {
             canScanRef.current = false;
