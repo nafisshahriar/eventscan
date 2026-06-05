@@ -7,11 +7,3 @@ const CameraScanner = dynamic(() => import('./Scanner'), {
   loading: () => <div style={{ padding: '50px', textAlign: 'center' }}>Starting camera...</div>
 });
 
-export default function Home() {
-  return (
-    <main style={{ maxWidth: '500px', margin: '0 auto', padding: '20px', textAlign: 'center', fontFamily: 'sans-serif' }}>
-      <h1>Entry Manager</h1>
-      <CameraScanner />
-    </main>
-  );
-}
