@@ -284,27 +284,27 @@ export default function Scanner() {
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
         .sc-root {
-          font-family: 'Space Grotesk', system-ui, sans-serif;
-          min-height: 100dvh;
-          background: #080c18;
-          color: #e2e8f0;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          padding-bottom: 48px;
-          padding: 20px;
-        }
-
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+  min-height: 100dvh;
+  background: #080c18;
+  color: #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-bottom: 48px;
+}
         /* ── Header ── */
         .sc-header {
-          width: 100%;
-          max-width: 440px;
-          display: flex;
-          justify-content: center;
-          align-items: center;
-          padding: 22px 20px 0;
-          position: relative;
-        }
+  width: 100%;
+  max-width: 440px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 22px 20px 0;
+  position: relative;
+}
+
+
         .sc-brand { display: flex; flex-direction: column; gap: 3px; justify-content: center; }
         .sc-logo {
           font-size: 16px;
@@ -618,14 +618,13 @@ export default function Scanner() {
 
         /* ── Disconnect row ── */
         .sc-disc-row {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          position: absolute;
-          right: 20px;
-          top: 22px;
-        }
-
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: absolute;
+  right: 20px;
+  top: 22px;
+}
         /* Loading dots */
         .sc-loading-text {
           font-size: 12px;
