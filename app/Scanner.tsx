@@ -17,7 +17,6 @@ interface MemberData {
 interface Config {
   url: string;
   column: string;
-  sheet: string;
 }
 
 type Phase =
@@ -40,12 +39,12 @@ async function postWithRetry(
 ): Promise<void> {
   for (let i = 0; i < attempts; i++) {
     try {
-      await fetch(url, {
+      const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "text/plain" },
         body: JSON.stringify(body),
       });
-      return; // any response means GAS received it
+      if (res.ok) return;
     } catch {
       if (i === attempts - 1) console.error("POST failed after retries");
       await new Promise((r) => setTimeout(r, 600 * (i + 1)));
@@ -59,6 +58,7 @@ export default function Scanner() {
   const [phase, setPhase] = useState<Phase>("boot");
   const [config, setConfig] = useState<Config | null>(null);
   const [member, setMember] = useState<MemberData | null>(null);
+  const [connError, setConnError] = useState(false);
   const [flashMessage, setFlashMessage] = useState<{
     text: string;
     type: "error" | "warn";
@@ -84,11 +84,30 @@ export default function Scanner() {
     }
   }, []);
 
-  // ── Skip connection test — go straight to idle or setup if no config.
+  // ── Test connection ─────────────────────────────────────────────────────────
   useEffect(() => {
-    if (phase !== "connecting") return;
-    if (!config) { setPhase("setup"); return; }
-    setPhase("idle");
+    if (phase !== "connecting" || !config) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await fetch(
+          `${config.url}?id=PING&col=${encodeURIComponent(config.column)}`,
+          { signal: AbortSignal.timeout(8000) }
+        );
+        if (!cancelled) {
+          setConnError(!res.ok);
+          setPhase(res.ok ? "idle" : "setup");
+        }
+      } catch {
+        if (!cancelled) {
+          setConnError(true);
+          setPhase("setup");
+        }
+      }
+    })();
+
+    return () => { cancelled = true; };
   }, [phase, config]);
 
   // ── Cleanup camera on unmount ───────────────────────────────────────────────
@@ -105,37 +124,19 @@ export default function Scanner() {
     []
   );
 
-  const resumeScanning = useCallback(() => {
-    setMember(null);
-    if (readerReady.current && scannerRef.current) {
-      try { scannerRef.current.resume(); } catch { }
-      setTimeout(() => { lockRef.current = false; }, 500);
-      setPhase("scanning");
-    } else {
-      setPhase("idle");
-    }
-  }, []);
-
   // ── Scan processor ──────────────────────────────────────────────────────────
   const processScan = useCallback(
     async (raw: string) => {
-      if (!config) { flash("No configuration — please set up the scanner first.", "warn"); resumeScanning(); return; }
+      if (!config) return;
       setPhase("processing");
 
       try {
         const res = await fetch(
-          `${config.url}?id=${encodeURIComponent(raw)}&col=${encodeURIComponent(config.column)}&sheet=${encodeURIComponent(config.sheet)}`,
+          `${config.url}?id=${encodeURIComponent(raw)}&col=${encodeURIComponent(config.column)}`,
           { signal: AbortSignal.timeout(10000) }
         );
-        // GAS returns 200 with JSON body — don't gate on res.ok which can
-        // be unreliable due to redirects. Just parse whatever came back.
-        const text = await res.text();
-        let data: MemberData;
-        try {
-          data = JSON.parse(text);
-        } catch {
-          throw new Error("Bad JSON: " + text.slice(0, 100));
-        }
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data: MemberData = await res.json();
 
         if (data.error) {
           flash("ID not found in database.", "warn");
@@ -144,13 +145,12 @@ export default function Scanner() {
           setMember(data);
           setPhase("result");
         }
-      } catch (err) {
-        console.error("Scan error:", err);
+      } catch {
         flash("Network error — check your connection.");
         resumeScanning();
       }
     },
-    [config, flash, resumeScanning]
+    [config, flash]
   );
 
   // ── Camera: init & start ────────────────────────────────────────────────────
@@ -197,6 +197,17 @@ export default function Scanner() {
     setPhase("scanning");
   }, [processScan, flash]);
 
+  const resumeScanning = useCallback(() => {
+    setMember(null);
+    if (readerReady.current && scannerRef.current) {
+      try { scannerRef.current.resume(); } catch { }
+      setTimeout(() => { lockRef.current = false; }, 500);
+      setPhase("scanning");
+    } else {
+      setPhase("idle");
+    }
+  }, []);
+
   const stopCamera = useCallback(async () => {
     if (scannerRef.current && readerReady.current) {
       try { await scannerRef.current.stop(); } catch {}
@@ -209,7 +220,7 @@ export default function Scanner() {
   // ── Confirm check-in ────────────────────────────────────────────────────────
   const confirmEntry = useCallback(() => {
     if (!member || !config) return;
-    postWithRetry(config.url, { row: member.row, col: config.column, sheet: config.sheet, val: 1 });
+    postWithRetry(config.url, { row: member.row, col: config.column, val: 1 });
     resumeScanning();
   }, [member, config, resumeScanning]);
 
@@ -252,6 +263,7 @@ export default function Scanner() {
     localStorage.removeItem(STORAGE_KEY);
     setConfig(null);
     setMember(null);
+    setConnError(false);
     setPhase("setup");
   }, [stopCamera]);
 
@@ -263,11 +275,11 @@ export default function Scanner() {
       const next: Config = {
         url: (fd.get("url") as string).trim(),
         column: (fd.get("column") as string).trim(),
-        sheet: ((fd.get("sheet") as string).trim()) || "Group Distrubution",
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
       setConfig(next);
-        setPhase("connecting");
+      setConnError(false);
+      setPhase("connecting");
     },
     []
   );
@@ -561,7 +573,7 @@ export default function Scanner() {
             <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
               <div className="sc-status-row">
                 <div className="sc-dot green" />
-                <span>{config?.sheet} · {config?.column}</span>
+                <span>{config?.column}</span>
               </div>
               <button
                 className="sc-btn ghost"
@@ -584,11 +596,16 @@ export default function Scanner() {
         {/* ── Setup screen ── */}
         {(phase === "setup") && (
           <form className="sc-setup" onSubmit={handleSetup}>
+            {connError && (
+              <div className="sc-flash error" style={{ margin: 0, width: "100%", boxSizing: "border-box" }}>
+                Connection failed — verify the URL and try again.
+              </div>
+            )}
             <div className="sc-field">
               <label>Google Script URL</label>
               <input
                 name="url"
-                type="text"
+                type="url"
                 required
                 autoComplete="off"
                 defaultValue={config?.url ?? ""}
@@ -605,15 +622,6 @@ export default function Scanner() {
                 placeholder="e.g. Day 1 Check-In"
               />
             </div>
-            <div className="sc-field">
-              <label>Sheet / Tab Name</label>
-              <input
-                name="sheet"
-                type="text"
-                defaultValue={config?.sheet ?? "Group Distrubution"}
-                placeholder="Group Distrubution"
-              />
-            </div>
             <button type="submit" className="sc-btn primary">
               Connect to Database
             </button>
@@ -621,7 +629,7 @@ export default function Scanner() {
         )}
 
         {/* ── Camera card (always rendered so #qr-reader stays in DOM) ── */}
-        {(phase === "idle" || phase === "scanning" || phase === "processing" || phase === "result") && (
+        {phase !== "setup" && (
           <>
             <div
               className="sc-card"
