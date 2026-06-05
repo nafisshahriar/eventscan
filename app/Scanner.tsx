@@ -607,7 +607,7 @@ export default function Scanner() {
               <label>Google Script URL</label>
               <input
                 name="url"
-                type="url"
+                type="text"
                 required
                 autoComplete="off"
                 defaultValue={config?.url ?? ""}
