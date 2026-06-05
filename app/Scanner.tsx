@@ -41,7 +41,7 @@ async function postWithRetry(
     try {
       const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "text/plain" },
+        headers: { "Content-Type": "application/json" }, // ← fixed
         body: JSON.stringify(body),
       });
       if (res.ok) return;
@@ -218,11 +218,19 @@ export default function Scanner() {
   }, []);
 
   // ── Confirm check-in ────────────────────────────────────────────────────────
-  const confirmEntry = useCallback(() => {
-    if (!member || !config) return;
-    postWithRetry(config.url, { row: member.row, col: config.column, val: 1 });
-    resumeScanning();
-  }, [member, config, resumeScanning]);
+const confirmEntry = useCallback(() => {
+  if (!member || !config) return;
+  
+  // Add the sheet name here so doPost uses the correct sheet
+  postWithRetry(config.url, { 
+    row: member.row, 
+    col: config.column, 
+    val: 1,
+    sheet: "Group Distrubution" // ← added
+  });
+  
+  resumeScanning();
+}, [member, config, resumeScanning]);
 
   // ── File upload fallback ─────────────────────────────────────────────────────
   const handleFile = useCallback(
