@@ -84,10 +84,10 @@ export default function Scanner() {
     }
   }, []);
 
-  // ── Skip connection test — GAS redirects make fetch unreliable for pinging.
-  // Go straight to idle; real errors will surface on first actual scan.
+  // ── Skip connection test — go straight to idle or setup if no config.
   useEffect(() => {
-    if (phase !== "connecting" || !config) return;
+    if (phase !== "connecting") return;
+    if (!config) { setPhase("setup"); return; }
     setPhase("idle");
   }, [phase, config]);
 
@@ -108,7 +108,7 @@ export default function Scanner() {
   // ── Scan processor ──────────────────────────────────────────────────────────
   const processScan = useCallback(
     async (raw: string) => {
-      if (!config) return;
+      if (!config) { flash("No configuration — please set up the scanner first.", "warn"); resumeScanning(); return; }
       setPhase("processing");
 
       try {
@@ -613,7 +613,7 @@ export default function Scanner() {
         )}
 
         {/* ── Camera card (always rendered so #qr-reader stays in DOM) ── */}
-        {phase !== "setup" && (
+        {(phase === "idle" || phase === "scanning" || phase === "processing" || phase === "result") && (
           <>
             <div
               className="sc-card"
