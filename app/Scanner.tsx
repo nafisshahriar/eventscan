@@ -17,6 +17,7 @@ interface MemberData {
 interface Config {
   url: string;
   column: string;
+  sheet: string;
 }
 
 type Phase =
@@ -92,7 +93,7 @@ export default function Scanner() {
     (async () => {
       try {
         const res = await fetch(
-          `${config.url}?id=PING&col=${encodeURIComponent(config.column)}`,
+          `${config.url}?id=PING&col=${encodeURIComponent(config.column)}&sheet=${encodeURIComponent(config.sheet)}`,
           { signal: AbortSignal.timeout(8000) }
         );
         if (!cancelled) {
@@ -132,7 +133,7 @@ export default function Scanner() {
 
       try {
         const res = await fetch(
-          `${config.url}?id=${encodeURIComponent(raw)}&col=${encodeURIComponent(config.column)}`,
+          `${config.url}?id=${encodeURIComponent(raw)}&col=${encodeURIComponent(config.column)}&sheet=${encodeURIComponent(config.sheet)}`,
           { signal: AbortSignal.timeout(10000) }
         );
         if (!res.ok) throw new Error("HTTP " + res.status);
@@ -220,7 +221,7 @@ export default function Scanner() {
   // ── Confirm check-in ────────────────────────────────────────────────────────
   const confirmEntry = useCallback(() => {
     if (!member || !config) return;
-    postWithRetry(config.url, { row: member.row, col: config.column, val: 1 });
+    postWithRetry(config.url, { row: member.row, col: config.column, sheet: config.sheet, val: 1 });
     resumeScanning();
   }, [member, config, resumeScanning]);
 
@@ -275,6 +276,7 @@ export default function Scanner() {
       const next: Config = {
         url: (fd.get("url") as string).trim(),
         column: (fd.get("column") as string).trim(),
+        sheet: ((fd.get("sheet") as string).trim()) || "Group Distrubution",
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
       setConfig(next);
@@ -573,7 +575,7 @@ export default function Scanner() {
             <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
               <div className="sc-status-row">
                 <div className="sc-dot green" />
-                <span>{config?.column}</span>
+                <span>{config?.sheet} · {config?.column}</span>
               </div>
               <button
                 className="sc-btn ghost"
@@ -620,6 +622,15 @@ export default function Scanner() {
                 required
                 defaultValue={config?.column ?? ""}
                 placeholder="e.g. Day 1 Check-In"
+              />
+            </div>
+            <div className="sc-field">
+              <label>Sheet / Tab Name</label>
+              <input
+                name="sheet"
+                type="text"
+                defaultValue={config?.sheet ?? "Group Distrubution"}
+                placeholder="Group Distrubution"
               />
             </div>
             <button type="submit" className="sc-btn primary">
