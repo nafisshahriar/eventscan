@@ -59,7 +59,6 @@ export default function Scanner() {
   const [phase, setPhase] = useState<Phase>("boot");
   const [config, setConfig] = useState<Config | null>(null);
   const [member, setMember] = useState<MemberData | null>(null);
-  const [connError, setConnError] = useState(false);
   const [flashMessage, setFlashMessage] = useState<{
     text: string;
     type: "error" | "warn";
@@ -85,30 +84,12 @@ export default function Scanner() {
     }
   }, []);
 
-  // ── Test connection ─────────────────────────────────────────────────────────
+  // ── Skip connection test — GAS redirects make fetch unreliable for pinging.
+  // Go straight to idle; real errors will surface on first actual scan.
   useEffect(() => {
     if (phase !== "connecting" || !config) return;
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const res = await fetch(
-          `${config.url}?id=PING&col=${encodeURIComponent(config.column)}&sheet=${encodeURIComponent(config.sheet)}`,
-          { signal: AbortSignal.timeout(8000) }
-        );
-        if (!cancelled) {
-          setConnError(!res.ok);
-          setPhase(res.ok ? "idle" : "setup");
-        }
-      } catch {
-        if (!cancelled) {
-          setConnError(true);
-          setPhase("setup");
-        }
-      }
-    })();
-
-    return () => { cancelled = true; };
+    setConnError(false);
+    setPhase("idle");
   }, [phase, config]);
 
   // ── Cleanup camera on unmount ───────────────────────────────────────────────
@@ -598,11 +579,6 @@ export default function Scanner() {
         {/* ── Setup screen ── */}
         {(phase === "setup") && (
           <form className="sc-setup" onSubmit={handleSetup}>
-            {connError && (
-              <div className="sc-flash error" style={{ margin: 0, width: "100%", boxSizing: "border-box" }}>
-                Connection failed — verify the URL and try again.
-              </div>
-            )}
             <div className="sc-field">
               <label>Google Script URL</label>
               <input
