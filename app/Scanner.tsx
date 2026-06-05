@@ -292,6 +292,7 @@ export default function Scanner() {
           flex-direction: column;
           align-items: center;
           padding-bottom: 48px;
+          padding: 20px;
         }
 
         /* ── Header ── */
@@ -299,11 +300,12 @@ export default function Scanner() {
           width: 100%;
           max-width: 440px;
           display: flex;
-          justify-content: space-between;
+          justify-content: center;
           align-items: center;
           padding: 22px 20px 0;
+          position: relative;
         }
-        .sc-brand { display: flex; flex-direction: column; gap: 3px; }
+        .sc-brand { display: flex; flex-direction: column; gap: 3px; justify-content: center; }
         .sc-logo {
           font-size: 16px;
           font-weight: 700;
@@ -313,7 +315,7 @@ export default function Scanner() {
         }
         .sc-logo-sub {
           font-size: 9.5px;
-          color: #334155;
+          color: #bb9004;
           letter-spacing: 2.5px;
           font-weight: 500;
         }
@@ -373,7 +375,7 @@ export default function Scanner() {
           font-size: 11px;
           font-weight: 700;
           letter-spacing: 2px;
-          color: #334155;
+          color: #bb9004;
           text-transform: uppercase;
           margin-bottom: 2px;
         }
@@ -382,7 +384,7 @@ export default function Scanner() {
           font-size: 11px;
           font-weight: 700;
           letter-spacing: 1.5px;
-          color: #475569;
+          color: #cbd2dd;
           text-transform: uppercase;
         }
         .sc-field input, .sc-field select {
@@ -414,14 +416,14 @@ export default function Scanner() {
           right: 14px;
           top: 50%;
           transform: translateY(-50%);
-          color: #334155;
+          color: #bb9004;
           pointer-events: none;
           font-size: 13px;
         }
         .sc-field select option { background: #0d1526; }
         .sc-col-hint {
           font-size: 11.5px;
-          color: #334155;
+          color: #bb9004;
           padding: 0 2px;
         }
 
@@ -549,7 +551,7 @@ export default function Scanner() {
         .sc-btn.primary:hover:not(:disabled) { background: #3b82f6; }
         .sc-btn.success { background: #047857; color: #fff; }
         .sc-btn.success:hover { background: #059669; }
-        .sc-btn.ghost { background: transparent; color: #475569; border: 1px solid #1e2d45; }
+        .sc-btn.ghost { background: transparent; color: #cbd2dd; border: 1px solid #1e2d45; }
         .sc-btn.ghost:hover { background: #0f172a; color: #94a3b8; border-color: #263d5f; }
         .sc-btn.sm { font-size: 12px; padding: 6px 13px; width: auto; }
 
@@ -592,7 +594,7 @@ export default function Scanner() {
         }
         .sc-member-dept {
           font-size: 13px;
-          color: #475569;
+          color: #cbd2dd;
           font-weight: 500;
         }
         .sc-already-in {
@@ -619,12 +621,15 @@ export default function Scanner() {
           display: flex;
           align-items: center;
           gap: 8px;
+          position: absolute;
+          right: 20px;
+          top: 22px;
         }
 
         /* Loading dots */
         .sc-loading-text {
           font-size: 12px;
-          color: #334155;
+          color: #bb9004;
           letter-spacing: 0.5px;
         }
       `}</style>
@@ -663,7 +668,6 @@ export default function Scanner() {
         {/* ── Setup screen ── */}
         {phase === "setup" && (
           <form className="sc-setup" onSubmit={handleSetup}>
-            <div className="sc-setup-title">Configuration</div>
 
             {connError && (
               <div className="sc-flash error" style={{ margin: 0, width: "100%" }}>
