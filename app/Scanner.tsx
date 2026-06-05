@@ -40,12 +40,12 @@ async function postWithRetry(
 ): Promise<void> {
   for (let i = 0; i < attempts; i++) {
     try {
-      const res = await fetch(url, {
+      await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "text/plain" },
         body: JSON.stringify(body),
       });
-      if (res.ok) return;
+      return; // any response means GAS received it
     } catch {
       if (i === attempts - 1) console.error("POST failed after retries");
       await new Promise((r) => setTimeout(r, 600 * (i + 1)));
@@ -105,6 +105,17 @@ export default function Scanner() {
     []
   );
 
+  const resumeScanning = useCallback(() => {
+    setMember(null);
+    if (readerReady.current && scannerRef.current) {
+      try { scannerRef.current.resume(); } catch { }
+      setTimeout(() => { lockRef.current = false; }, 500);
+      setPhase("scanning");
+    } else {
+      setPhase("idle");
+    }
+  }, []);
+
   // ── Scan processor ──────────────────────────────────────────────────────────
   const processScan = useCallback(
     async (raw: string) => {
@@ -116,8 +127,15 @@ export default function Scanner() {
           `${config.url}?id=${encodeURIComponent(raw)}&col=${encodeURIComponent(config.column)}&sheet=${encodeURIComponent(config.sheet)}`,
           { signal: AbortSignal.timeout(10000) }
         );
-        if (!res.ok) throw new Error("HTTP " + res.status);
-        const data: MemberData = await res.json();
+        // GAS returns 200 with JSON body — don't gate on res.ok which can
+        // be unreliable due to redirects. Just parse whatever came back.
+        const text = await res.text();
+        let data: MemberData;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          throw new Error("Bad JSON: " + text.slice(0, 100));
+        }
 
         if (data.error) {
           flash("ID not found in database.", "warn");
@@ -126,12 +144,13 @@ export default function Scanner() {
           setMember(data);
           setPhase("result");
         }
-      } catch {
+      } catch (err) {
+        console.error("Scan error:", err);
         flash("Network error — check your connection.");
         resumeScanning();
       }
     },
-    [config, flash]
+    [config, flash, resumeScanning]
   );
 
   // ── Camera: init & start ────────────────────────────────────────────────────
@@ -177,17 +196,6 @@ export default function Scanner() {
 
     setPhase("scanning");
   }, [processScan, flash]);
-
-  const resumeScanning = useCallback(() => {
-    setMember(null);
-    if (readerReady.current && scannerRef.current) {
-      try { scannerRef.current.resume(); } catch { }
-      setTimeout(() => { lockRef.current = false; }, 500);
-      setPhase("scanning");
-    } else {
-      setPhase("idle");
-    }
-  }, []);
 
   const stopCamera = useCallback(async () => {
     if (scannerRef.current && readerReady.current) {
