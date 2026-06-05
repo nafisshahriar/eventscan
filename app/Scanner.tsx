@@ -88,7 +88,6 @@ export default function Scanner() {
   // Go straight to idle; real errors will surface on first actual scan.
   useEffect(() => {
     if (phase !== "connecting" || !config) return;
-    setConnError(false);
     setPhase("idle");
   }, [phase, config]);
 
@@ -245,7 +244,6 @@ export default function Scanner() {
     localStorage.removeItem(STORAGE_KEY);
     setConfig(null);
     setMember(null);
-    setConnError(false);
     setPhase("setup");
   }, [stopCamera]);
 
@@ -261,8 +259,7 @@ export default function Scanner() {
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
       setConfig(next);
-      setConnError(false);
-      setPhase("connecting");
+        setPhase("connecting");
     },
     []
   );
